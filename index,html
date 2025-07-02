@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kepler GPS Visualizer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.22.9/babel.min.js"></script>
+  <script src="https://unpkg.com/@deck.gl/core@8.9.*/dist.min.js"></script>
+  <script src="https://unpkg.com/@deck.gl/layers@8.9.*/dist.min.js"></script>
+  <script src="https://unpkg.com/@deck.gl/geo-layers@8.9.*/dist.min.js"></script>
+  <script src="https://unpkg.com/kepler.gl@2.5.5/dist/kepler-gl.min.js"></script>
+  <script src="https://unpkg.com/react-redux@7.2.9/dist/react-redux.min.js"></script>
+  <script src="https://unpkg.com/redux@4.2.0/dist/redux.min.js"></script>
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.9.2/mapbox-gl.js"></script>
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.9.2/mapbox-gl.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <style>
+    body { margin: 0; font-family: 'Arial', sans-serif; }
+    #app { height: 100vh; width: 100vw; display: flex; }
+    .sidebar { width: 320px; background: #1a202c; color: white; padding: 1rem; overflow-y: auto; transition: width 0.3s; }
+    .sidebar.collapsed { width: 60px; padding: 1rem 0.5rem; }
+    .sidebar.collapsed .sidebar-content { display: none; }
+    .map-container { flex: 1; position: relative; }
+    .kepler-gl { height: 100% !important; width: 100% !important; }
+    .control-panel { background: rgba(255, 255, 255, 0.95); padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem; }
+    .file-upload { margin: 1rem 0; }
+    .btn { background: #4a90e2; color: white; padding: 0.5rem 1rem; border-radius: 0.25rem; cursor: pointer; transition: background 0.2s; }
+    .btn:hover { background: #357abd; }
+    .toggle-btn { position: absolute; top: 1rem; left: 1rem; z-index: 10; }
+    .filter-input { width: 100%; padding: 0.5rem; border-radius: 0.25rem; border: 1px solid #e2e8f0; }
+    @media (max-width: 768px) { .sidebar { width: 250px; } .sidebar.collapsed { width: 50px; } }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    const { Provider } = ReactRedux;
+    const { createStore } = Redux;
+    const { Map, KeplerGl } = window.keplerGl;
+
+    // Sample GeoJSON data with richer properties for filtering
+    const sampleData = {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: { type: "LineString", coordinates: [[-122.4, 37.8], [-122.3, 37.85], [-122.2, 37.9]] },
+          properties: { name: "Track 1", timestamp: "2025-07-01T10:00:00Z", speed: 50 }
+        },
+        {
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [-122.35, 37.82] },
+          properties: { name: "Point A", timestamp: "2025-07-01T10:01:00Z", speed: 0 }
+        },
+        {
+          type: "Feature",
+          geometry: { type: "Point", coordinates: [-122.25, 37.88] },
+          properties: { name: "Point B", timestamp: "2025-07-02T12:00:00Z", speed: 10 }
+        }
+      ]
+    };
+
+    // Redux store for Kepler.gl
+    const store = createStore(
+      window.keplerGl.keplerGlReducer,
+      { keplerGl: { map: {} } }
+    );
+
+    const App = () => {
+      const [data, setData] = useState(sampleData);
+      const [layerVisibility, setLayerVisibility] = useState({ point: true, line: true });
+      const [filters, setFilters] = useState({ startTime: '', endTime: '', speed: '' });
+      const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
+      // Process CSV to GeoJSON with auto-detection of lat/lng columns
+      const processCSV = (csvText) => {
+        const lines = csvText.split('\n').map(line => line.split(',').map(item => item.trim()));
+        const headers = lines[0];
+        const latField = headers.find(h => h.toLowerCase().includes('lat') || h.toLowerCase().includes('latitude'));
+        const lngField = headers.find(h => h.toLowerCase().includes('lng') || h.toLowerCase().includes('longitude'));
+        if (!latField || !lngField) {
+          alert('CSV must contain latitude and longitude columns');
+          return null;
+        }
+
+        const features = lines.slice(1).filter(line => line.length >= headers.length).map(line => {
+          const properties = {};
+          headers.forEach((header, i) => {
+            properties[header] = line[i];
+          });
+          return {
+            type: "Feature",
+            geometry: {
+              type: "Point",
+              coordinates: [parseFloat(line[headers.indexOf(lngField)]), parseFloat(line[headers.indexOf(latField)])]
+            },
+            properties
+          };
+        }).filter(f => !isNaN(f.geometry.coordinates[0]) && !isNaN(f.geometry.coordinates[1]));
+
+        return { type: "FeatureCollection", features };
+      };
+
+      // Handle file upload (GeoJSON or CSV)
+      const handleFileUpload = (event) => {
+        const file = event.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            try {
+              if (file.name.endsWith('.csv')) {
+                const csvData = processCSV(e.target.result);
+                if (csvData) setData(csvData);
+              } else {
+                const jsonData = JSON.parse(e.target.result);
+                setData(jsonData);
+              }
+            } catch (error) {
+              alert('Error parsing file. Ensure it is a valid GeoJSON or CSV.');
+            }
+          };
+          reader.readAsText(file);
+        }
+      };
+
+      // Apply filters to data
+      const filteredData = {
+        ...data,
+        features: data.features.filter(feature => {
+          const { timestamp, speed } = feature.properties;
+          const time = new Date(timestamp);
+          const startTime = filters.startTime ? new Date(filters.startTime) : null;
+          const endTime = filters.endTime ? new Date(filters.endTime) : null;
+          const speedNum = parseFloat(filters.speed) || null;
+
+          return (
+            (!startTime || time >= startTime) &&
+            (!endTime || time <= endTime) &&
+            (!speedNum || (feature.properties.speed && parseFloat(feature.properties.speed) >= speedNum))
+          );
+        })
+      };
+
+      // Update Kepler.gl with data and filters
+      useEffect(() => {
+        store.dispatch({
+          type: 'ADD_DATA_TO_MAP',
+          payloads: [{
+            datasets: {
+              info: { label: 'GPS Data', id: 'gps_data' },
+              data: filteredData
+            },
+            config: {
+              visState: {
+                layers: [
+                  {
+                    type: 'point',
+                    config: { dataId: 'gps_data', isVisible: layerVisibility.point }
+                  },
+                  {
+                    type: 'geojson',
+                    config: { dataId: 'gps_data', isVisible: layerVisibility.line }
+                  }
+                ]
+              }
+            }
+          }]
+        });
+      }, [filteredData, layerVisibility]);
+
+      // Toggle layer visibility
+      const toggleLayer = (layer) => {
+        setLayerVisibility((prev) => ({ ...prev, [layer]: !prev[layer] }));
+      };
+
+      // Handle filter changes
+      const handleFilterChange = (e) => {
+        const { name, value } = e.target;
+        setFilters((prev) => ({ ...prev, [name]: value }));
+      };
+
+      return (
+        <div id="app">
+          <div className={`sidebar ${isSidebarOpen ? '' : 'collapsed'}`}>
+            <button
+              className="btn toggle-btn"
+              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            >
+              {isSidebarOpen ? '◄' : '►'}
+            </button>
+            <div className="sidebar-content">
+              <h1 className="text-2xl font-bold mb-4">Kepler GPS Visualizer</h1>
+              <div className="control-panel">
+                <h2 className="text-lg font-semibold mb-2">Data Upload</h2>
+                <div className="file-upload">
+                  <label className="block text-sm font-medium text-gray-200 mb-1">
+                    Upload GeoJSON/CSV
+                  </label>
+                  <input
+                    type="file"
+                    accept=".json,.geojson,.csv"
+                    onChange={handleFileUpload}
+                    className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                  />
+                </div>
+                <button
+                  className="btn w-full"
+                  onClick={() => setData(sampleData)}
+                >
+                  Reset to Sample Data
+                </button>
+              </div>
+              <div className="control-panel">
+                <h2 className="text-lg font-semibold mb-2">Filters</h2>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-200 mb-1">
+                    Start Time
+                  </label>
+                  <input
+                    type="datetime-local"
+                    name="startTime"
+                    value={filters.startTime}
+                    onChange={handleFilterChange}
+                    className="filter-input"
+                  />
+                </div>
+                <div className="mb-4">
+                  <label className="block text-sm font/
+                    font-medium text-gray-200 mb-1">
+                    End Time
+                  </label>
+                  <input
+                    type="datetime-local"
+                    name="endTime"
+                    value={filters.endTime}
+                    onChange={handleFilterChange}
+                    className="filter-input"
+                  />
+                </div>
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-gray-200 mb-1">
+                    Min Speed (km/h)
+                  </label>
+                  <input
+                    type="number"
+                    name="speed"
+                    value={filters.speed}
+                    onChange={handleFilterChange}
+                    className="filter-input"
+                    placeholder="Enter minimum speed"
+                  />
+                </div>
+              </div>
+              <div className="control-panel">
+                <h2 className="text-lg font-semibold mb-2">Layer Controls</h2>
+                <label className="flex items-center mb-2">
+                  <input
+                    type="checkbox"
+                    checked={layerVisibility.point}
+                    onChange={() => toggleLayer('point')}
+                    className="mr-2"
+                  />
+                  Show Points
+                </label>
+                <label className="flex items-center">
+                  <input
+                    type="checkbox"
+                    checked={layerVisibility.line}
+                    onChange={() => toggleLayer('line')}
+                    className="mr-2"
+                  />
+                  Show Tracks
+                </label>
+              </div>
+            </div>
+          </div>
+          <div className="map-container">
+            <Provider store={store}>
+              <Map
+                mapboxApiAccessToken="pk.eyJ1IjoibWFwYm94IiwiYSI6ImNpejY4NXVycTA2emYycXBndHRqcmZ3N3gifQ.rJcFIG214AriISLbB5xQ3g"
+                mapStyle="mapbox://styles/mapbox/dark-v10"
+                width="100%"
+                height="100%"
+              >
+                <KeplerGl id="map" />
+              </Map>
+            </Provider>
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
